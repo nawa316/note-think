@@ -27,8 +27,6 @@ interface CanvasProps {
   eraseWidth: number;
 }
 
-const PALM_PRESSURE_THRESHOLD = 0.03;
-
 export default function Canvas({
   strokes,
   onStrokesChange,
@@ -40,26 +38,21 @@ export default function Canvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const currentStroke = useRef<Point[]>([]);
   const isDrawing = useRef(false);
-  const isPenActive = useRef(false);
+  const isPenNearby = useRef(false);       // pen hovering/touching
+  const activePointerId = useRef<number | null>(null); // only the TIP pointer
 
-  // ─── S Pen barrel button state ────────────────────────────────────────────
-  // Tracked as a ref (not state) so handlers always see the latest value
-  // without needing to be re-created.
-  //
-  // Samsung S Pen barrel button can appear as:
-  //   • e.button === 5  (barrel button index — most reliable on Samsung)
-  //   • (e.buttons & 32) !== 0  (bitmask — W3C spec)
-  // We track press/release separately so pointerup still knows it was eraser.
+  // ── Barrel button state ──────────────────────────────────────────────────
+  // Tracked at document level so we catch it during hover (before tip touch).
+  // Persists into pointerup where e.buttons is already 0.
   const barrelPressed = useRef(false);
 
   const [penDetected, setPenDetected] = useState(false);
-  const [eraserActive, setEraserActive] = useState(false); // UI indicator
+  const [eraserFromButton, setEraserFromButton] = useState(false);
 
-  // ─── Determine active tool ────────────────────────────────────────────────
-  // Called on every pointer event. Uses barrelPressed ref so it's correct
-  // even on pointerup (where e.buttons is already 0).
-  const getActiveTool = useCallback(
+  // ── Resolve active tool ──────────────────────────────────────────────────
+  const resolveActiveTool = useCallback(
     (e: PointerEvent): Tool => {
+      // Barrel button (button index 5 or bitmask bit 5)
       if (
         barrelPressed.current ||
         e.button === 5 ||
@@ -72,52 +65,37 @@ export default function Canvas({
     [tool]
   );
 
-  // ─── Canvas drawing ───────────────────────────────────────────────────────
-  const redraw = useCallback(
-    (extraStroke?: { points: Point[]; color: string; width: number; tool: Tool }) => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      // Grid
-      ctx.strokeStyle = "#e8e8f0";
-      ctx.lineWidth = 0.5;
-      const gs = 40;
-      for (let x = 0; x < canvas.width; x += gs) {
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
-      }
-      for (let y = 0; y < canvas.height; y += gs) {
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
-      }
-
-      const all = extraStroke ? [...strokes, extraStroke] : strokes;
-      for (const s of all) {
-        if (s.points.length < 2) continue;
-        drawStroke(ctx, s);
-      }
-    },
-    [strokes]
-  );
+  // ── Draw helpers ─────────────────────────────────────────────────────────
+  const drawGrid = useCallback((ctx: CanvasRenderingContext2D, w: number, h: number) => {
+    ctx.save();
+    ctx.strokeStyle = "#e8e8f0";
+    ctx.lineWidth = 0.5;
+    const gs = 40;
+    for (let x = 0; x < w; x += gs) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+    }
+    for (let y = 0; y < h; y += gs) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    }
+    ctx.restore();
+  }, []);
 
   function drawStroke(
     ctx: CanvasRenderingContext2D,
     stroke: { points: Point[]; color: string; width: number; tool: Tool }
   ) {
+    if (stroke.points.length < 2) return;
     ctx.save();
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
 
     if (stroke.tool === "eraser") {
-      ctx.globalCompositeOperation = "destination-out";
-      ctx.strokeStyle = "rgba(0,0,0,1)";
+      // Erase with white fill so grid (drawn after) stays intact
+      ctx.globalCompositeOperation = "source-over";
+      ctx.strokeStyle = "#ffffff";
     } else if (stroke.tool === "marker") {
       ctx.globalCompositeOperation = "source-over";
-      ctx.globalAlpha = 0.4;
+      ctx.globalAlpha = 0.35;
       ctx.strokeStyle = stroke.color;
     } else {
       ctx.globalCompositeOperation = "source-over";
@@ -129,23 +107,56 @@ export default function Canvas({
     for (let i = 1; i < stroke.points.length - 1; i++) {
       const p = stroke.points[i];
       const pNext = stroke.points[i + 1];
+      const pressure = p.pressure || 0.5;
       ctx.lineWidth =
         stroke.tool === "eraser"
           ? stroke.width
-          : stroke.width * (0.5 + (p.pressure || 0.5) * 0.8);
+          : stroke.width * (0.4 + pressure * 0.9);
       const midX = (p.x + pNext.x) / 2;
       const midY = (p.y + pNext.y) / 2;
       ctx.quadraticCurveTo(p.x, p.y, midX, midY);
     }
-    const last = stroke.points[stroke.points.length - 1];
-    ctx.lineTo(last.x, last.y);
+    ctx.lineTo(
+      stroke.points[stroke.points.length - 1].x,
+      stroke.points[stroke.points.length - 1].y
+    );
     ctx.stroke();
     ctx.restore();
   }
 
+  // ── Redraw ────────────────────────────────────────────────────────────────
+  // Grid is drawn LAST so the eraser (white stroke) cannot cover it.
+  const redraw = useCallback(
+    (
+      extraStroke?: { points: Point[]; color: string; width: number; tool: Tool }
+    ) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      const w = canvas.width / window.devicePixelRatio;
+      const h = canvas.height / window.devicePixelRatio;
+
+      // 1. White background
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // 2. All committed strokes
+      for (const s of strokes) drawStroke(ctx, s);
+
+      // 3. Live (in-progress) stroke
+      if (extraStroke) drawStroke(ctx, extraStroke);
+
+      // 4. Grid on top — always visible, never erased
+      drawGrid(ctx, w, h);
+    },
+    [strokes, drawGrid]
+  );
+
   useEffect(() => { redraw(); }, [redraw]);
 
-  // Resize observer
+  // ── Resize observer ───────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -161,9 +172,9 @@ export default function Canvas({
     return () => observer.disconnect();
   }, [redraw]);
 
-  function getCanvasPoint(e: PointerEvent): Point {
-    const canvas = canvasRef.current!;
-    const rect = canvas.getBoundingClientRect();
+  // ── Coordinate helper ─────────────────────────────────────────────────────
+  function getPoint(e: PointerEvent): Point {
+    const rect = canvasRef.current!.getBoundingClientRect();
     return {
       x: e.clientX - rect.left,
       y: e.clientY - rect.top,
@@ -171,32 +182,52 @@ export default function Canvas({
     };
   }
 
-  function shouldReject(e: PointerEvent): boolean {
-    if (e.pointerType === "pen") return false;
-    if (e.pointerType === "touch" && isPenActive.current) return true;
-    if (e.pointerType === "touch" && e.pressure < PALM_PRESSURE_THRESHOLD) return true;
-    return false;
-  }
-
-  // ─── Pointer event handlers ───────────────────────────────────────────────
-  const handlePointerDown = useCallback(
-    (e: PointerEvent) => {
-      if (shouldReject(e)) return;
-
-      if (e.pointerType === "pen") {
-        isPenActive.current = true;
-        setPenDetected(true);
-
-        // Detect barrel button on press (button index 5)
-        if (e.button === 5 || (e.buttons & 32) !== 0) {
-          barrelPressed.current = true;
-          setEraserActive(true);
+  // ── Document-level barrel button tracker ─────────────────────────────────
+  // This fires when the barrel button is pressed while HOVERING —
+  // before the tip ever touches the canvas, so canvas events miss it.
+  useEffect(() => {
+    const onDocDown = (e: PointerEvent) => {
+      if (e.pointerType !== "pen") return;
+      if (e.button === 5 || (e.buttons & 32) !== 0) {
+        barrelPressed.current = true;
+        setEraserFromButton(true);
+      }
+    };
+    const onDocUp = (e: PointerEvent) => {
+      if (e.pointerType !== "pen") return;
+      if (e.button === 5 || barrelPressed.current) {
+        // Only clear if no barrel bit still held
+        if ((e.buttons & 32) === 0) {
+          barrelPressed.current = false;
+          setEraserFromButton(false);
         }
       }
+    };
+    document.addEventListener("pointerdown", onDocDown, true);
+    document.addEventListener("pointerup", onDocUp, true);
+    return () => {
+      document.removeEventListener("pointerdown", onDocDown, true);
+      document.removeEventListener("pointerup", onDocUp, true);
+    };
+  }, []);
+
+  // ── Canvas pointer handlers ───────────────────────────────────────────────
+  const handlePointerDown = useCallback(
+    (e: PointerEvent) => {
+      // Only respond to S Pen tip — ignore fingers (let them scroll/pinch)
+      if (e.pointerType !== "pen") return;
+      // Ignore barrel-only events (no tip contact — pressure 0, button 5)
+      if (e.button === 5 || (e.pressure === 0 && e.buttons === 32)) return;
+      // Ignore if another pointer is already drawing
+      if (activePointerId.current !== null) return;
+
+      isPenNearby.current = true;
+      setPenDetected(true);
+      activePointerId.current = e.pointerId;
 
       canvasRef.current?.setPointerCapture(e.pointerId);
       isDrawing.current = true;
-      currentStroke.current = [getCanvasPoint(e)];
+      currentStroke.current = [getPoint(e)];
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     []
@@ -204,20 +235,19 @@ export default function Canvas({
 
   const handlePointerMove = useCallback(
     (e: PointerEvent) => {
-      if (e.pointerType === "pen") {
-        isPenActive.current = true;
-        // Keep barrel state in sync during move (some devices only report in move)
-        if ((e.buttons & 32) !== 0) {
-          barrelPressed.current = true;
-          setEraserActive(true);
-        }
-      }
+      if (e.pointerType === "pen") isPenNearby.current = true;
       if (!isDrawing.current) return;
-      if (shouldReject(e)) return;
+      if (e.pointerId !== activePointerId.current) return;
 
-      currentStroke.current.push(getCanvasPoint(e));
+      // Keep barrel state updated during move (some Samsung devices
+      // only report it in move events, not in down)
+      if ((e.buttons & 32) !== 0) {
+        barrelPressed.current = true;
+        setEraserFromButton(true);
+      }
 
-      const activeTool = getActiveTool(e);
+      currentStroke.current.push(getPoint(e));
+      const activeTool = resolveActiveTool(e);
       redraw({
         points: currentStroke.current,
         color,
@@ -226,22 +256,15 @@ export default function Canvas({
       });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tool, color, penWidth, eraseWidth, redraw, getActiveTool]
+    [tool, color, penWidth, eraseWidth, redraw, resolveActiveTool]
   );
 
   const handlePointerUp = useCallback(
     (e: PointerEvent) => {
-      // Commit stroke using the barrelPressed ref (NOT e.buttons which is 0 on up)
-      const activeTool = getActiveTool(e);
+      if (e.pointerId !== activePointerId.current) return;
+      activePointerId.current = null;
 
-      if (e.pointerType === "pen") {
-        isPenActive.current = false;
-        // Release barrel button if it was the button that went up (button index 5)
-        if (e.button === 5) {
-          barrelPressed.current = false;
-          setEraserActive(false);
-        }
-      }
+      if (e.pointerType === "pen") isPenNearby.current = false;
 
       if (!isDrawing.current) return;
       isDrawing.current = false;
@@ -251,33 +274,25 @@ export default function Canvas({
         return;
       }
 
-      const newStroke: Stroke = {
-        points: currentStroke.current,
-        color,
-        width: activeTool === "eraser" ? eraseWidth : penWidth,
-        tool: activeTool,
-        timestamp: Date.now(),
-      };
-
-      onStrokesChange([...strokes, newStroke]);
+      // resolveActiveTool reads barrelPressed ref — still accurate on pointerup
+      const activeTool = resolveActiveTool(e);
+      onStrokesChange([
+        ...strokes,
+        {
+          points: currentStroke.current,
+          color,
+          width: activeTool === "eraser" ? eraseWidth : penWidth,
+          tool: activeTool,
+          timestamp: Date.now(),
+        },
+      ]);
       currentStroke.current = [];
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tool, color, penWidth, eraseWidth, strokes, onStrokesChange, getActiveTool]
+    [tool, color, penWidth, eraseWidth, strokes, onStrokesChange, resolveActiveTool]
   );
 
-  // ─── Also track barrel button via pointercancel & global pointerup ────────
-  // Some Samsung devices fire pointercancel when barrel button is released
-  const handleGlobalPointerUp = useCallback((e: PointerEvent) => {
-    if (e.button === 5 || (e.buttons & 32) === 0) {
-      if (barrelPressed.current) {
-        barrelPressed.current = false;
-        setEraserActive(false);
-      }
-    }
-  }, []);
-
-  // Attach events
+  // ── Attach events ─────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -286,39 +301,41 @@ export default function Canvas({
     canvas.addEventListener("pointermove", handlePointerMove);
     canvas.addEventListener("pointerup", handlePointerUp);
     canvas.addEventListener("pointercancel", handlePointerUp);
+    // Prevent context menu from appearing on long S Pen button press
     canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-
-    // Track barrel button release globally (in case it fires outside canvas)
-    window.addEventListener("pointerup", handleGlobalPointerUp);
 
     return () => {
       canvas.removeEventListener("pointerdown", handlePointerDown);
       canvas.removeEventListener("pointermove", handlePointerMove);
       canvas.removeEventListener("pointerup", handlePointerUp);
       canvas.removeEventListener("pointercancel", handlePointerUp);
-      window.removeEventListener("pointerup", handleGlobalPointerUp);
     };
-  }, [handlePointerDown, handlePointerMove, handlePointerUp, handleGlobalPointerUp]);
+  }, [handlePointerDown, handlePointerMove, handlePointerUp]);
 
   return (
     <div className="relative w-full h-full">
       {/* Status badges */}
-      <div className="absolute top-3 right-3 z-10 flex flex-col gap-1 items-end">
-        {penDetected && !eraserActive && (
+      <div className="absolute top-3 right-3 z-10 flex flex-col gap-1 items-end pointer-events-none">
+        {penDetected && !eraserFromButton && (
           <div className="bg-indigo-600 text-white text-xs px-3 py-1 rounded-full shadow flex items-center gap-1">
             <span>✦</span> S Pen
           </div>
         )}
-        {eraserActive && (
+        {eraserFromButton && (
           <div className="bg-rose-500 text-white text-xs px-3 py-1 rounded-full shadow flex items-center gap-1 animate-pulse">
             <span>⬜</span> Eraser (Button)
           </div>
         )}
       </div>
+
+      {/*
+        touch-action: pan-x pan-y  ← lets fingers scroll/pinch-zoom freely
+        S Pen tip events are NOT affected by touch-action, so drawing still works.
+      */}
       <canvas
         ref={canvasRef}
-        className="w-full h-full touch-none cursor-crosshair"
-        style={{ touchAction: "none" }}
+        className="w-full h-full cursor-crosshair"
+        style={{ touchAction: "pan-x pan-y" }}
       />
     </div>
   );

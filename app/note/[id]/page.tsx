@@ -261,8 +261,8 @@ export default function NotePage() {
           onSave={() => save(strokes)}
         />
 
-        {/* Canvas */}
-        <div className="flex-1 overflow-hidden relative">
+        {/* Canvas — finger scroll/pinch-zoom pans & zooms; S Pen draws */}
+        <div className="flex-1 overflow-auto relative">
           <Canvas
             strokes={strokes}
             onStrokesChange={handleStrokesChange}
