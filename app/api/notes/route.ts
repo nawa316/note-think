@@ -1,46 +1,54 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/app/api/auth/[...nextauth]/route";
-import connectDB from "@/lib/db";
-import Note from "@/lib/models/Note";
+import { getAuthUser, createSupabaseServerClient } from "@/lib/supabase-server";
 
-// GET /api/notes — list all notes for current user
+// GET /api/notes — list all notes for current user (no strokes, lightweight)
 export async function GET() {
-  const session = await getServerSession(authOptions);
-  if (!session?.user) {
+  const user = await getAuthUser();
+  if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  await connectDB();
+  const supabase = await createSupabaseServerClient();
 
-  const userId = (session.user as { id: string }).id;
-  const notes = await Note.find({ userId })
-    .select("title thumbnail createdAt updatedAt")
-    .sort({ updatedAt: -1 });
+  const { data, error } = await supabase
+    .from("notes")
+    .select("id, title, thumbnail, created_at, updated_at")
+    .eq("user_id", user.id)
+    .order("updated_at", { ascending: false });
 
-  return NextResponse.json(notes);
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json(data);
 }
 
-// POST /api/notes — create a new note
+// POST /api/notes — create a new empty note
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user) {
+  const user = await getAuthUser();
+  if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  await connectDB();
-
-  const userId = (session.user as { id: string }).id;
+  const supabase = await createSupabaseServerClient();
   const body = await req.json();
 
-  const note = await Note.create({
-    userId,
-    title: body.title || "Untitled Note",
-    strokes: [],
-    thumbnail: "",
-    canvasWidth: body.canvasWidth || 1920,
-    canvasHeight: body.canvasHeight || 1080,
-  });
+  const { data, error } = await supabase
+    .from("notes")
+    .insert({
+      user_id: user.id,
+      title: body.title || "Untitled Note",
+      strokes: [],
+      thumbnail: "",
+      canvas_width: body.canvasWidth || 1920,
+      canvas_height: body.canvasHeight || 1080,
+    })
+    .select()
+    .single();
 
-  return NextResponse.json(note, { status: 201 });
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json(data, { status: 201 });
 }

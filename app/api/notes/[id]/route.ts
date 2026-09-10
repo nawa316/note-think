@@ -1,75 +1,82 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/app/api/auth/[...nextauth]/route";
-import connectDB from "@/lib/db";
-import Note from "@/lib/models/Note";
+import { getAuthUser, createSupabaseServerClient } from "@/lib/supabase-server";
 
-type Params = { params: { id: string } };
+type Params = { params: Promise<{ id: string }> };
 
 // GET /api/notes/[id] — fetch single note with all strokes
 export async function GET(_req: NextRequest, { params }: Params) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user) {
+  const user = await getAuthUser();
+  if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  await connectDB();
-  const userId = (session.user as { id: string }).id;
+  const { id } = await params;
+  const supabase = await createSupabaseServerClient();
 
-  const note = await Note.findOne({ _id: params.id, userId });
-  if (!note) {
+  const { data, error } = await supabase
+    .from("notes")
+    .select("*")
+    .eq("id", id)
+    .eq("user_id", user.id)
+    .single();
+
+  if (error || !data) {
     return NextResponse.json({ error: "Note not found" }, { status: 404 });
   }
 
-  return NextResponse.json(note);
+  return NextResponse.json(data);
 }
 
-// PUT /api/notes/[id] — save/update strokes & title
+// PUT /api/notes/[id] — save strokes, title, thumbnail
 export async function PUT(req: NextRequest, { params }: Params) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user) {
+  const user = await getAuthUser();
+  if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  await connectDB();
-  const userId = (session.user as { id: string }).id;
-
+  const { id } = await params;
   const body = await req.json();
+  const supabase = await createSupabaseServerClient();
 
-  const note = await Note.findOneAndUpdate(
-    { _id: params.id, userId },
-    {
-      $set: {
-        title: body.title,
-        strokes: body.strokes,
-        thumbnail: body.thumbnail || "",
-        canvasWidth: body.canvasWidth,
-        canvasHeight: body.canvasHeight,
-      },
-    },
-    { new: true }
-  );
+  const { data, error } = await supabase
+    .from("notes")
+    .update({
+      title: body.title,
+      strokes: body.strokes,
+      thumbnail: body.thumbnail || "",
+      canvas_width: body.canvasWidth,
+      canvas_height: body.canvasHeight,
+    })
+    .eq("id", id)
+    .eq("user_id", user.id)
+    .select()
+    .single();
 
-  if (!note) {
+  if (error || !data) {
     return NextResponse.json({ error: "Note not found" }, { status: 404 });
   }
 
-  return NextResponse.json(note);
+  return NextResponse.json(data);
 }
 
 // DELETE /api/notes/[id]
 export async function DELETE(_req: NextRequest, { params }: Params) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user) {
+  const user = await getAuthUser();
+  if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  await connectDB();
-  const userId = (session.user as { id: string }).id;
+  const { id } = await params;
+  const supabase = await createSupabaseServerClient();
 
-  const note = await Note.findOneAndDelete({ _id: params.id, userId });
-  if (!note) {
-    return NextResponse.json({ error: "Note not found" }, { status: 404 });
+  const { error } = await supabase
+    .from("notes")
+    .delete()
+    .eq("id", id)
+    .eq("user_id", user.id);
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
   return NextResponse.json({ message: "Note deleted" });
