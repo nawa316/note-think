@@ -179,6 +179,53 @@ export default function NotePage() {
     return () => window.removeEventListener("keydown", handleKey);
   }, [undo, redo, save, strokes]);
 
+  // ── Zoom / Pan — ALL hooks must be before any early return ───────────────
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const pinchRef = useRef<{ dist: number; cx: number; cy: number } | null>(null);
+  const canvasWrapperRef = useRef<HTMLDivElement>(null);
+  const MIN_ZOOM = 0.25;
+  const MAX_ZOOM = 5;
+
+  // Native touchmove with passive:false so preventDefault works for pinch
+  useEffect(() => {
+    const el = canvasWrapperRef.current;
+    if (!el) return;
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length !== 2 || !pinchRef.current) return;
+      e.preventDefault();
+      const t0 = e.touches[0], t1 = e.touches[1];
+      const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+      const cx = (t0.clientX + t1.clientX) / 2;
+      const cy = (t0.clientY + t1.clientY) / 2;
+      const sf = dist / pinchRef.current.dist;
+      const dx = cx - pinchRef.current.cx;
+      const dy = cy - pinchRef.current.cy;
+      setZoom(prev => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, prev * sf)));
+      setPan(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+      pinchRef.current = { dist, cx, cy };
+    };
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    return () => el.removeEventListener("touchmove", onTouchMove);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      const t0 = e.touches[0], t1 = e.touches[1];
+      pinchRef.current = {
+        dist: Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY),
+        cx: (t0.clientX + t1.clientX) / 2,
+        cy: (t0.clientY + t1.clientY) / 2,
+      };
+    }
+  };
+  const handleTouchEnd = () => { pinchRef.current = null; };
+
+  const zoomIn  = () => setZoom(z => Math.min(MAX_ZOOM, +(z * 1.25).toFixed(2)));
+  const zoomOut = () => setZoom(z => Math.max(MIN_ZOOM, +(z / 1.25).toFixed(2)));
+  const resetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
+
   // Cleanup timer on unmount
   useEffect(() => () => { if (autosaveTimer.current) clearTimeout(autosaveTimer.current); }, []);
 
@@ -194,47 +241,6 @@ export default function NotePage() {
       </div>
     );
   }
-
-  // ── Zoom / Pan ────────────────────────────────────────────────────────────
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const pinchRef = useRef<{ dist: number; cx: number; cy: number } | null>(null);
-  const MIN_ZOOM = 0.25;
-  const MAX_ZOOM = 5;
-
-  const handleTouchStart = (e: React.TouchEvent) => {
-    if (e.touches.length === 2) {
-      const t0 = e.touches[0], t1 = e.touches[1];
-      pinchRef.current = {
-        dist: Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY),
-        cx: (t0.clientX + t1.clientX) / 2,
-        cy: (t0.clientY + t1.clientY) / 2,
-      };
-    }
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (e.touches.length !== 2 || !pinchRef.current) return;
-    e.preventDefault();
-    const t0 = e.touches[0], t1 = e.touches[1];
-    const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
-    const cx = (t0.clientX + t1.clientX) / 2;
-    const cy = (t0.clientY + t1.clientY) / 2;
-
-    const sf = dist / pinchRef.current.dist;
-    const dx = cx - pinchRef.current.cx;
-    const dy = cy - pinchRef.current.cy;
-
-    setZoom(prev => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, prev * sf)));
-    setPan(prev => ({ x: prev.x + dx, y: prev.y + dy }));
-    pinchRef.current = { dist, cx, cy };
-  };
-
-  const handleTouchEnd = () => { pinchRef.current = null; };
-
-  const zoomIn  = () => setZoom(z => Math.min(MAX_ZOOM, +(z * 1.25).toFixed(2)));
-  const zoomOut = () => setZoom(z => Math.max(MIN_ZOOM, +(z / 1.25).toFixed(2)));
-  const resetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
 
   const canUndo = historyIndex.current > 0;
   const canRedo = historyIndex.current < history.current.length - 1;
@@ -302,9 +308,9 @@ export default function NotePage() {
 
         {/* Canvas wrapper — handles 2-finger pinch zoom + pan */}
         <div
+          ref={canvasWrapperRef}
           className="flex-1 overflow-hidden relative bg-gray-100"
           onTouchStart={handleTouchStart}
-          onTouchMove={handleTouchMove}
           onTouchEnd={handleTouchEnd}
         >
           {/* Transformed canvas container */}
