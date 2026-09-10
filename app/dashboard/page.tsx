@@ -41,8 +41,15 @@ export default function DashboardPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "Untitled Note" }),
     });
+
     const note = await res.json();
     setCreating(false);
+
+    if (!res.ok) {
+      alert(`Could not create note: ${note.error || res.status}\n\nMake sure you ran supabase/schema.sql in your Supabase SQL Editor.`);
+      return;
+    }
+
     router.push(`/note/${note.id}`);
   };
 
