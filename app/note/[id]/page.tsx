@@ -195,6 +195,47 @@ export default function NotePage() {
     );
   }
 
+  // ── Zoom / Pan ────────────────────────────────────────────────────────────
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const pinchRef = useRef<{ dist: number; cx: number; cy: number } | null>(null);
+  const MIN_ZOOM = 0.25;
+  const MAX_ZOOM = 5;
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      const t0 = e.touches[0], t1 = e.touches[1];
+      pinchRef.current = {
+        dist: Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY),
+        cx: (t0.clientX + t1.clientX) / 2,
+        cy: (t0.clientY + t1.clientY) / 2,
+      };
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (e.touches.length !== 2 || !pinchRef.current) return;
+    e.preventDefault();
+    const t0 = e.touches[0], t1 = e.touches[1];
+    const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+    const cx = (t0.clientX + t1.clientX) / 2;
+    const cy = (t0.clientY + t1.clientY) / 2;
+
+    const sf = dist / pinchRef.current.dist;
+    const dx = cx - pinchRef.current.cx;
+    const dy = cy - pinchRef.current.cy;
+
+    setZoom(prev => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, prev * sf)));
+    setPan(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+    pinchRef.current = { dist, cx, cy };
+  };
+
+  const handleTouchEnd = () => { pinchRef.current = null; };
+
+  const zoomIn  = () => setZoom(z => Math.min(MAX_ZOOM, +(z * 1.25).toFixed(2)));
+  const zoomOut = () => setZoom(z => Math.max(MIN_ZOOM, +(z / 1.25).toFixed(2)));
+  const resetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
+
   const canUndo = historyIndex.current > 0;
   const canRedo = historyIndex.current < history.current.length - 1;
 
@@ -210,7 +251,6 @@ export default function NotePage() {
           ←
         </Link>
 
-        {/* Editable title */}
         <input
           value={title}
           onChange={(e) => setTitle(e.target.value)}
@@ -219,7 +259,6 @@ export default function NotePage() {
           maxLength={100}
         />
 
-        {/* Save status */}
         <div className="flex items-center gap-2 shrink-0">
           {saveStatus === "saving" && (
             <span className="text-xs text-indigo-500 animate-pulse">Saving…</span>
@@ -261,23 +300,60 @@ export default function NotePage() {
           onSave={() => save(strokes)}
         />
 
-        {/* Canvas — finger scroll/pinch-zoom pans & zooms; S Pen draws */}
-        <div className="flex-1 overflow-auto relative">
-          <Canvas
-            strokes={strokes}
-            onStrokesChange={handleStrokesChange}
-            tool={tool}
-            color={color}
-            penWidth={penWidth}
-            eraseWidth={eraseWidth}
-          />
+        {/* Canvas wrapper — handles 2-finger pinch zoom + pan */}
+        <div
+          className="flex-1 overflow-hidden relative bg-gray-100"
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+        >
+          {/* Transformed canvas container */}
+          <div
+            style={{
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transformOrigin: "0 0",
+              width: "100%",
+              height: "100%",
+            }}
+          >
+            <Canvas
+              strokes={strokes}
+              onStrokesChange={handleStrokesChange}
+              tool={tool}
+              color={color}
+              penWidth={penWidth}
+              eraseWidth={eraseWidth}
+              zoom={zoom}
+            />
+          </div>
+
+          {/* Zoom controls overlay */}
+          <div className="absolute bottom-4 right-4 z-20 flex items-center gap-1 bg-white/90 backdrop-blur rounded-2xl shadow-md border border-gray-200 px-2 py-1.5">
+            <button
+              onClick={zoomOut}
+              className="w-8 h-8 flex items-center justify-center rounded-xl hover:bg-gray-100 text-gray-700 font-bold text-lg"
+              title="Zoom out"
+            >−</button>
+            <button
+              onClick={resetView}
+              className="px-2 text-xs font-mono text-gray-600 hover:bg-gray-100 rounded-lg py-1"
+              title="Reset zoom"
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <button
+              onClick={zoomIn}
+              className="w-8 h-8 flex items-center justify-center rounded-xl hover:bg-gray-100 text-gray-700 font-bold text-lg"
+              title="Zoom in"
+            >+</button>
+          </div>
         </div>
       </div>
 
-      {/* Bottom S Pen hint bar (mobile) */}
+      {/* S Pen hint bar */}
       <div className="sm:hidden shrink-0 bg-indigo-50 border-t border-indigo-100 px-4 py-2 flex items-center justify-center gap-2 text-xs text-indigo-600">
         <span>✦</span>
-        <span>Use S Pen to draw · Side button = Eraser · Palm rejection active</span>
+        <span>S Pen draws · Button = Eraser toggle · 2 fingers = zoom/pan</span>
       </div>
     </div>
   );
